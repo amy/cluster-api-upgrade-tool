@@ -21,6 +21,8 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	clusterapiv1alpha2 "sigs.k8s.io/cluster-api/api/v1alpha2"
 	"sigs.k8s.io/cluster-api/controllers/external"
 	"sigs.k8s.io/cluster-api/controllers/noderefutil"
@@ -75,35 +77,29 @@ func (u *ControlPlaneUpgrader) Upgrade() error {
 	}
 
 	if isMinorVersionUpgrade(min, u.desiredVersion) {
-		u.log.Info("TEST: update configmap if needed")
 		err = u.updateKubeletConfigMapIfNeeded(u.desiredVersion)
 		if err != nil {
 			return err
 		}
 
-		u.log.Info("TEST: update rbac if needed")
 		err = u.updateKubeletRbacIfNeeded(u.desiredVersion)
 		if err != nil {
 			return err
 		}
 	}
 
-	u.log.Info("TEST: etcd cluster health check")
 	if err := u.etcdClusterHealthCheck(time.Minute * 1); err != nil {
 		return err
 	}
 
-	u.log.Info("TEST: update provider ids to nodes")
 	if err := u.UpdateProviderIDsToNodes(); err != nil {
 		return err
 	}
 
-	u.log.Info("TEST: update kubeadm version")
 	if err := u.updateAndUploadKubeadmKubernetesVersion(); err != nil {
 		return err
 	}
 
-	u.log.Info("TEST: update CRDs")
 	return u.updateCRDs(machines)
 }
 
@@ -249,22 +245,25 @@ func (u *ControlPlaneUpgrader) etcdClusterHealthCheck(timeout time.Duration) err
 	return err
 }
 
-func (u *ControlPlaneUpgrader) updateObjectReference(name string, ref *v1.ObjectReference) (*v1.ObjectReference, error) {
+func (u *ControlPlaneUpgrader) updateObjectReference(name string, ref *v1.ObjectReference) (*v1.ObjectReference, *unstructured.Unstructured, error) {
+
 	if ref.Namespace == "" {
 		ref.Namespace = "default"
 	}
 	object, err := external.Get(u.ctrlClient, ref, ref.Namespace)
 	if err != nil {
-		return &v1.ObjectReference{}, err
+		return &v1.ObjectReference{}, nil, err
 	}
 
 	object.SetResourceVersion("")
 	object.SetName(name)
+	object.SetOwnerReferences([]metav1.OwnerReference{})
+	unstructured.RemoveNestedField(object.UnstructuredContent(), "spec", "providerID")
 
 	ref.ResourceVersion = ""
 	ref.Name = name
 
-	return ref, u.ctrlClient.Create(context.TODO(), object)
+	return ref, object, nil
 }
 
 func (u *ControlPlaneUpgrader) updateMachine(name string, machine clusterapiv1alpha2.Machine, machineCreator *MachineCreator) error {
@@ -353,21 +352,22 @@ func (u *ControlPlaneUpgrader) updateCRDs(machines *clusterapiv1alpha2.MachineLi
 		name := fmt.Sprintf("%s-%s-%d", nameParts[0], nameParts[1], time.Now().Unix())
 		// TODO: generate the name based off each respective object
 
-		u.log.Info("TEST: update infra ref")
-		infraMachine, err := u.updateObjectReference(name, &machine.Spec.InfrastructureRef)
+		infraMachine, object, err := u.updateObjectReference(name, &machine.Spec.InfrastructureRef)
+		if err != nil {
+			return err
+		}
+		err = u.ctrlClient.Create(context.TODO(), object)
 		if err != nil {
 			return err
 		}
 		machine.Spec.InfrastructureRef = *infraMachine
 
-		u.log.Info("TEST: update bootstrap ref")
-		bootstrap, err := u.updateObjectReference(name, machine.Spec.Bootstrap.ConfigRef)
+		bootstrap, object, err := u.updateObjectReference(name, machine.Spec.Bootstrap.ConfigRef)
 		if err != nil {
 			return err
 		}
 		machine.Spec.Bootstrap.ConfigRef = bootstrap
 
-		u.log.Info("TEST: update machine")
 		if err := u.updateMachine(name, machine, machineCreator); err != nil {
 			return err
 		}
@@ -490,13 +490,11 @@ func (u *ControlPlaneUpgrader) oldNodeToEtcdMemberId(timeout time.Duration) erro
 
 // deleteEtcdMember deletes the old etcd member
 func (u *ControlPlaneUpgrader) deleteEtcdMember(timeout time.Duration, newNode string, etcdMemberId string) error {
-	u.log.Info("TEST:", "new node", newNode)
 	u.log.Info("deleteEtcdMember")
 	pods, err := u.listEtcdPods()
 	if err != nil {
 		return err
 	}
-	u.log.Info("TEST: length of pods can u see this? :)")
 
 	if len(pods) == 0 {
 		return errors.New("found 0 etcd pods")
@@ -518,7 +516,6 @@ func (u *ControlPlaneUpgrader) deleteEtcdMember(timeout time.Duration, newNode s
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	u.log.Info("TEST: etcdctlforpod")
 	_, _, err = u.etcdctlForPod(ctx, pod, "member", "remove", etcdMemberId)
 	return err
 }
@@ -560,9 +557,6 @@ func (u *ControlPlaneUpgrader) etcdctlForPod(ctx context.Context, pod *v1.Pod, a
 	}
 
 	fullArgs = append(fullArgs, args...)
-
-	u.log.Info("HIT 123", "pod-namespace", pod.Namespace)
-	u.log.Info("HIT 123", "pod-name", pod.Name)
 
 	opts := kubernetes.PodExecInput{
 		RestConfig:       u.targetRestConfig,

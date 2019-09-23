@@ -14,8 +14,11 @@ import (
 	kubernetes2 "github.com/vmware/cluster-api-upgrade-tool/pkg/internal/kubernetes"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	bootstrapv1 "sigs.k8s.io/cluster-api-bootstrap-provider-kubeadm/api/v1alpha2"
+	capiv1 "sigs.k8s.io/cluster-api/api/v1alpha2"
 	clusterapiv1alpha2client "sigs.k8s.io/cluster-api/cmd/clusterctl/clusterdeployer/clusterclient"
 	"sigs.k8s.io/cluster-api/controllers/noderefutil"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -54,9 +57,12 @@ func newBase(log logr.Logger, config Config) (*base, error) {
 	if err != nil {
 		return nil, err
 	}
+	scheme := runtime.NewScheme()
+	bootstrapv1.AddToScheme(scheme)
+	capiv1.AddToScheme(scheme)
 
 	log.Info("Creating controller runtime client")
-	ctrlRuntimeClient, err := ctrlclient.New(managementRestConfig, ctrlclient.Options{}) // @TODO use NewCached() from cluster-api?
+	ctrlRuntimeClient, err := ctrlclient.New(managementRestConfig, ctrlclient.Options{Scheme: scheme}) // @TODO use NewCached() from cluster-api?
 	if err != nil {
 		return nil, errors.Wrap(err, "error creating controller runtime client")
 	}
