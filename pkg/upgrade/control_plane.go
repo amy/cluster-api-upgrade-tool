@@ -21,6 +21,8 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	clusterapiv1alpha2 "sigs.k8s.io/cluster-api/api/v1alpha2"
 	"sigs.k8s.io/cluster-api/controllers/external"
 	"sigs.k8s.io/cluster-api/controllers/noderefutil"
@@ -249,22 +251,27 @@ func (u *ControlPlaneUpgrader) etcdClusterHealthCheck(timeout time.Duration) err
 	return err
 }
 
-func (u *ControlPlaneUpgrader) updateObjectReference(name string, ref *v1.ObjectReference) (*v1.ObjectReference, error) {
+func (u *ControlPlaneUpgrader) updateObjectReference(name string, ref *v1.ObjectReference) (*v1.ObjectReference, *unstructured.Unstructured, error) {
+	u.log.Info("ENTERED UPDATE OBJECT REFERENCE")
+
 	if ref.Namespace == "" {
 		ref.Namespace = "default"
 	}
 	object, err := external.Get(u.ctrlClient, ref, ref.Namespace)
 	if err != nil {
-		return &v1.ObjectReference{}, err
+		u.log.Info("TEST: Error External", "Error", err)
+		return &v1.ObjectReference{}, nil, err
 	}
 
 	object.SetResourceVersion("")
 	object.SetName(name)
+	object.SetOwnerReferences([]metav1.OwnerReference{})
+	unstructured.RemoveNestedField(object.UnstructuredContent(), "spec", "providerID")
 
 	ref.ResourceVersion = ""
 	ref.Name = name
 
-	return ref, u.ctrlClient.Create(context.TODO(), object)
+	return ref, object, nil
 }
 
 func (u *ControlPlaneUpgrader) updateMachine(name string, machine clusterapiv1alpha2.Machine, machineCreator *MachineCreator) error {
@@ -354,14 +361,18 @@ func (u *ControlPlaneUpgrader) updateCRDs(machines *clusterapiv1alpha2.MachineLi
 		// TODO: generate the name based off each respective object
 
 		u.log.Info("TEST: update infra ref")
-		infraMachine, err := u.updateObjectReference(name, &machine.Spec.InfrastructureRef)
+		infraMachine, object, err := u.updateObjectReference(name, &machine.Spec.InfrastructureRef)
+		if err != nil {
+			return err
+		}
+		err = u.ctrlClient.Create(context.TODO(), object)
 		if err != nil {
 			return err
 		}
 		machine.Spec.InfrastructureRef = *infraMachine
 
 		u.log.Info("TEST: update bootstrap ref")
-		bootstrap, err := u.updateObjectReference(name, machine.Spec.Bootstrap.ConfigRef)
+		bootstrap, object, err := u.updateObjectReference(name, machine.Spec.Bootstrap.ConfigRef)
 		if err != nil {
 			return err
 		}

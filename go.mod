@@ -12,6 +12,7 @@ require (
 	github.com/sirupsen/logrus v1.3.0
 	github.com/spf13/cobra v0.0.3
 	github.com/stretchr/testify v1.3.0
+	golang.org/x/tools/gopls v0.1.7 // indirect
 	k8s.io/api v0.0.0-20190711103429-37c3b8b1ca65
 	k8s.io/apiextensions-apiserver v0.0.0-20190409022649-727a075fdec8
 	k8s.io/apimachinery v0.0.0-20190711103026-7bf792636534
