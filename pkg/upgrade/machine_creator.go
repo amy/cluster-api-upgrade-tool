@@ -214,7 +214,6 @@ func (n *MachineCreator) waitForProviderID(ns, name string, timeout time.Duratio
 
 func (n *MachineCreator) waitForMatchingNode(rawProviderID string, timeout time.Duration) (*v1.Node, error) {
 	n.log.Info("Waiting for node", "provider-id", rawProviderID)
-	n.log.Info("TEST: timeout", "duration", timeout)
 	var matchingNode v1.Node
 	providerID, err := noderefutil.NewProviderID(rawProviderID)
 	if err != nil {
