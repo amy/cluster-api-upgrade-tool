@@ -45,8 +45,7 @@ func (u *MachineDeploymentUpgrader) listMachineDeployments() (*clusterapiv1alpha
 
 	selectors := []ctrlclient.ListOption{
 		ctrlclient.MatchingLabels{
-			"cluster.k8s.io/cluster-name": u.clusterName,
-			"set":                         "node",
+			"cluster.x-k8s.io/cluster-name": u.clusterName,
 		},
 		ctrlclient.InNamespace(u.clusterNamespace),
 	}
@@ -62,7 +61,8 @@ func (u *MachineDeploymentUpgrader) listMachineDeployments() (*clusterapiv1alpha
 func (u *MachineDeploymentUpgrader) upgradeMachineDeployments(list *clusterapiv1alpha2.MachineDeploymentList) error {
 	for _, machineDeployment := range list.Items {
 		// Skip any machineDeployments that already have this upgrade annotation id
-		if val, ok := machineDeployment.Spec.Template.Annotations[UpgradeIDAnnotationKey]; ok && val == u.upgradeID {
+		if val := machineDeployment.Spec.Template.Spec.Version; val != nil && *val == u.upgradeID {
+			// if val, ok := machineDeployment.Spec.Template.Annotations[UpgradeIDAnnotationKey]; ok && val == u.upgradeID {
 			continue
 		}
 		if err := u.updateMachineDeployment(&machineDeployment); err != nil {
@@ -82,6 +82,7 @@ func (u *MachineDeploymentUpgrader) updateMachineDeployment(machineDeployment *c
 	// Make the modification(s)
 	desiredVersion := u.desiredVersion.String()
 	machineDeployment.Spec.Template.Spec.Version = &desiredVersion
+
 	// Add the upgrade ID to this template so all machines get it
 	if machineDeployment.Spec.Template.Annotations == nil {
 		machineDeployment.Spec.Template.Annotations = map[string]string{}
@@ -96,7 +97,6 @@ func (u *MachineDeploymentUpgrader) updateMachineDeployment(machineDeployment *c
 
 	// Get the updated version in json
 	updated := machineDeployment.DeepCopy()
-
 	err := u.ctrlClient.Patch(context.TODO(), updated, ctrlclient.MergeFrom(original))
 	if err != nil {
 		return errors.Wrapf(err, "error patching machinedeployment %s", machineDeployment.Name)
