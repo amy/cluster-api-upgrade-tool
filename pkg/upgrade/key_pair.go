@@ -5,16 +5,12 @@ package upgrade
 
 import (
 	"encoding/base64"
-	"strings"
 
 	"github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	clusterapiv1alpha2 "sigs.k8s.io/cluster-api/api/v1alpha2"
 	"sigs.k8s.io/cluster-api/util/certs"
 	"sigs.k8s.io/cluster-api/util/kubeconfig"
 )
@@ -47,47 +43,6 @@ func NewRestConfigFromKubeconfigSecretRef(secrets secrets, name string) (*rest.C
 	}
 	cfg, err := clientcmd.RESTConfigFromKubeConfig(kc)
 	return cfg, errors.WithStack(err)
-}
-
-// NewRestConfigFromCAClusterField returns a rest.Config configured with the CA key pair found in the cluster's
-// object in the fieldpath specified. For example, "spec.providerSpec.value.caKeyPair" traverses the cluster
-// object going through each '.' delimited field.
-func NewRestConfigFromCAClusterField(cluster *clusterapiv1alpha2.Cluster, fieldPath, apiEndpoint string) (*rest.Config, error) {
-	pathParts := strings.Split(fieldPath, ".")
-	certPath := append(pathParts, "cert")
-	u, err := runtime.DefaultUnstructuredConverter.ToUnstructured(cluster)
-	if err != nil {
-		return nil, errors.Wrap(err, "error converting cluster to unstructured")
-	}
-	certEncoded, found, err := unstructured.NestedString(u, certPath...)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to extract key pair cert from %q", strings.Join(certPath, "."))
-	}
-	if !found {
-		return nil, errors.Errorf("unable to find key pair cert in field %q", strings.Join(certPath, "."))
-	}
-	cert := make([]byte, base64.StdEncoding.DecodedLen(len(certEncoded)))
-	if _, err := base64.StdEncoding.Decode(cert, []byte(certEncoded)); err != nil {
-		return nil, errors.Wrap(err, "error decoding key pair cert from secret")
-	}
-
-	keyPath := append(pathParts, "key")
-	keyEncoded, found, err := unstructured.NestedString(u, keyPath...)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to extract key pair key from %q", strings.Join(keyPath, "."))
-	}
-	if !found {
-		return nil, errors.Errorf("unable to find key pair key in field %q", strings.Join(keyPath, "."))
-	}
-	key := make([]byte, base64.StdEncoding.DecodedLen(len(keyEncoded)))
-	if _, err = base64.StdEncoding.Decode(key, []byte(keyEncoded)); err != nil {
-		return nil, errors.Wrap(err, "error decoding key pair key from secret")
-	}
-	kp := &keyPair{
-		Cert: cert,
-		Key:  key,
-	}
-	return restConfigFromKeyPair(cluster.GetName(), apiEndpoint, kp)
 }
 
 // NewRestConfigFromCASecretRef gets the CA key pair from the secret and builds a *rest.Config with them.

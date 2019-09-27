@@ -17,9 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
-	bootstrapv1 "sigs.k8s.io/cluster-api-bootstrap-provider-kubeadm/api/v1alpha2"
-	kubeadmv1beta1 "sigs.k8s.io/cluster-api-bootstrap-provider-kubeadm/kubeadm/v1beta1"
-	clusterapiv1alpha2 "sigs.k8s.io/cluster-api/api/v1alpha2"
+	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha2"
 	"sigs.k8s.io/cluster-api/controllers/noderefutil"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -30,26 +28,6 @@ type podGetter interface {
 
 type nodeLister interface {
 	List(options metav1.ListOptions) (*v1.NodeList, error)
-}
-
-type machineGetter interface {
-	Get(name string, namespace string) (*clusterapiv1alpha2.Machine, error)
-}
-
-type GetMachine struct {
-	ctrlclient ctrlclient.Client
-}
-
-func (m *GetMachine) Get(name string, namespace string) (*clusterapiv1alpha2.Machine, error) {
-	machine := &clusterapiv1alpha2.Machine{}
-	if err := m.ctrlclient.Get(context.TODO(), ctrlclient.ObjectKey{Namespace: namespace, Name: name}, machine); err != nil {
-		return nil, err
-	}
-	return machine, nil
-}
-
-type machineCreator interface {
-	Create(machine *clusterapiv1alpha2.Machine) (*clusterapiv1alpha2.Machine, error)
 }
 
 // MachineOptions are the values that can change on a machine upgrade
@@ -66,17 +44,14 @@ type MachineCreator struct {
 	shouldWaitForMatchingNode bool
 	shouldWaitForNodeReady    bool
 	MachineOptions            MachineOptions
-	ctrlclient                ctrlclient.Client
+	managementClient          ctrlclient.Client
 
 	providerIDTimeout   time.Duration
 	matchingNodeTimeout time.Duration
 	nodeReadyTimeout    time.Duration
 	podGetter           podGetter
 	nodeLister          nodeLister
-	machineCreator      machineCreator
-	machineGetter       machineGetter
 	log                 logr.Logger
-	namespace           string
 }
 
 // NewMachineCreator takes a list of option functions to configure the MachineCreator.
@@ -97,7 +72,7 @@ func NewMachineCreator(options ...MachineCreatorOption) *MachineCreator {
 
 // NewMachine is the main interface to MachineCreator.
 // It creates a machine object on the management cluster and optionally waits for the backing node to become ready.
-func (n *MachineCreator) NewMachine(name string, source *clusterapiv1alpha2.Machine) (*clusterapiv1alpha2.Machine, *v1.Node, error) {
+func (n *MachineCreator) NewMachine(namespace, name string, source *clusterv1.Machine) (*clusterv1.Machine, *v1.Node, error) {
 	newMachine := source.DeepCopy()
 
 	// have to clear this out so we can create a new machine
@@ -106,41 +81,7 @@ func (n *MachineCreator) NewMachine(name string, source *clusterapiv1alpha2.Mach
 	// have to clear this out so the new machine can get its own provider id set
 	newMachine.Spec.ProviderID = nil
 
-	// make sure to set desired namespace
-	newMachine.Namespace = n.namespace
-
 	newMachine.Name = name
-
-	// create bootstrap join config
-	bootstrapConfig := bootstrapv1.KubeadmConfig{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: n.namespace,
-		},
-		Spec: bootstrapv1.KubeadmConfigSpec{
-			JoinConfiguration: &kubeadmv1beta1.JoinConfiguration{
-				ControlPlane: &kubeadmv1beta1.JoinControlPlane{},
-				NodeRegistration: kubeadmv1beta1.NodeRegistrationOptions{
-					Name: `{{ ds.meta_data.hostname }}`,
-					KubeletExtraArgs: map[string]string{
-						"cloud-provider": "aws",
-					},
-				},
-			},
-		},
-	}
-	err := n.ctrlclient.Create(context.TODO(), &bootstrapConfig)
-	if err != nil {
-		return nil, nil, errors.Wrapf(err, "Error creating join bootstrap config: %s", name)
-	}
-
-	// update reference
-	newMachine.Spec.Bootstrap = clusterapiv1alpha2.Bootstrap{ConfigRef: &v1.ObjectReference{
-		Kind:       "KubeadmConfig",
-		APIVersion: bootstrapv1.GroupVersion.String(),
-		Name:       name,
-		Namespace:  n.namespace,
-	}}
 
 	if n.MachineOptions.ImageField != "" && n.MachineOptions.ImageID != "" {
 		if err := updateMachineSpecImage(&newMachine.Spec, n.MachineOptions.ImageField, n.MachineOptions.ImageID); err != nil {
@@ -153,8 +94,7 @@ func (n *MachineCreator) NewMachine(name string, source *clusterapiv1alpha2.Mach
 
 	n.log.Info("Creating new machine", "name", newMachine.Name)
 
-	err = n.ctrlclient.Create(context.TODO(), newMachine)
-	if err != nil {
+	if err := n.managementClient.Create(context.TODO(), newMachine); err != nil {
 		return nil, nil, errors.Wrapf(err, "Error creating machine: %s", newMachine.Name)
 	}
 
@@ -189,9 +129,10 @@ func (n *MachineCreator) waitForProviderID(ns, name string, timeout time.Duratio
 	n.log.Info("waitForMachineProviderID start", "namespace", ns, "name", name)
 	var providerID string
 	err := wait.PollImmediate(5*time.Second, timeout, func() (bool, error) {
-		machine, err := n.machineGetter.Get(name, n.namespace)
-		if err != nil {
-			return false, err
+
+		machine := &clusterv1.Machine{}
+		if err := n.managementClient.Get(context.TODO(), ctrlclient.ObjectKey{Name: name, Namespace: ns}, machine); err != nil {
+			return false, errors.WithStack(err)
 		}
 
 		if machine.Spec.ProviderID == nil {
@@ -361,18 +302,8 @@ func WithNodeReadyTimeout(timeout time.Duration) MachineCreatorOption {
 		n.nodeReadyTimeout = timeout
 	}
 }
-func WithNamespace(namespace string) MachineCreatorOption {
+func WithManagementClient(c ctrlclient.Client) MachineCreatorOption {
 	return func(n *MachineCreator) {
-		n.namespace = namespace
-	}
-}
-func WithControllerRuntimeClient(c ctrlclient.Client) MachineCreatorOption {
-	return func(n *MachineCreator) {
-		n.ctrlclient = c
-	}
-}
-func WithMachineGetter(getter machineGetter) MachineCreatorOption {
-	return func(n *MachineCreator) {
-		n.machineGetter = getter
+		n.managementClient = c
 	}
 }
