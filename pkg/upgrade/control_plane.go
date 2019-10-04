@@ -342,10 +342,12 @@ func (u *ControlPlaneUpgrader) updateCRDs(machines *clusterv1.MachineList) error
 			return err
 		}
 
-		err = u.updateBootstrapConfig(name, &machine)
+		updatedBootstrap, err := u.updateBootstrapConfig(name, &machine)
 		if err != nil {
 			return err
 		}
+
+		err = u.updateSecrets(updatedBootstrap)
 
 		if err := u.updateMachine(name, machine, machineCreator); err != nil {
 			return err
@@ -355,7 +357,41 @@ func (u *ControlPlaneUpgrader) updateCRDs(machines *clusterv1.MachineList) error
 	return nil
 }
 
-func (u *ControlPlaneUpgrader) updateBootstrapConfig(name string, machine *clusterv1.Machine) error {
+func (u *ControlPlaneUpgrader) updateSecrets(bootstrap *bootstrapv1.KubeadmConfig) error {
+	u.log.Info("TEST: ENTERED UPDATE SECRET")
+	secretNames := []string{
+		fmt.Sprintf("%s-ca", u.clusterName),
+		fmt.Sprintf("%s-etcd", u.clusterName),
+		fmt.Sprintf("%s-sa", u.clusterName),
+		fmt.Sprintf("%s-proxy", u.clusterName),
+	}
+
+	for _, secretName := range secretNames {
+		secret := &v1.Secret{}
+		if err := u.managerClusterClient.Get(context.TODO(), ctrlclient.ObjectKey{Name: secretName, Namespace: u.clusterNamespace}, secret); err != nil {
+			return errors.WithStack(err)
+		}
+		patch := ctrlclient.MergeFrom(secret.DeepCopyObject())
+
+		secret.SetOwnerReferences([]metav1.OwnerReference{
+			metav1.OwnerReference{
+				APIVersion: bootstrapv1.GroupVersion.String(),
+				Kind:       "KubeadmConfig",
+				Name:       bootstrap.Name,
+				UID:        bootstrap.UID,
+			},
+		})
+
+		u.log.Info("TEST: ", "secret", secret.OwnerReferences)
+		if err := u.managerClusterClient.Patch(context.TODO(), secret.DeepCopyObject(), patch); err != nil {
+			return errors.WithStack(err)
+		}
+	}
+
+	return nil
+}
+
+func (u *ControlPlaneUpgrader) updateBootstrapConfig(name string, machine *clusterv1.Machine) (*bootstrapv1.KubeadmConfig, error) {
 	// copy node registration
 	bootstrap := &bootstrapv1.KubeadmConfig{}
 	if machine.Spec.Bootstrap.ConfigRef.Namespace == "" {
@@ -363,7 +399,7 @@ func (u *ControlPlaneUpgrader) updateBootstrapConfig(name string, machine *clust
 	}
 	err := u.managerClusterClient.Get(context.TODO(), ctrlclient.ObjectKey{Name: machine.Spec.Bootstrap.ConfigRef.Name, Namespace: machine.Spec.Bootstrap.ConfigRef.Namespace}, bootstrap)
 	if err != nil {
-		return errors.WithStack(err)
+		return nil, errors.WithStack(err)
 	}
 
 	// modify bootstrap config
@@ -390,7 +426,7 @@ func (u *ControlPlaneUpgrader) updateBootstrapConfig(name string, machine *clust
 
 	err = u.managerClusterClient.Create(context.TODO(), bootstrap)
 	if err != nil {
-		return errors.WithStack(err)
+		return nil, errors.WithStack(err)
 	}
 
 	// update machine's bootstrap reference
@@ -403,7 +439,9 @@ func (u *ControlPlaneUpgrader) updateBootstrapConfig(name string, machine *clust
 		},
 	}
 
-	return nil
+	u.log.Info("TEST: ", "kubeconfig", bootstrap)
+
+	return bootstrap, nil
 }
 
 func (u *ControlPlaneUpgrader) updateInfrastructureReference(name string, machine *clusterv1.Machine) error {
